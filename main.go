@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -30,6 +30,8 @@ func main() {
 		cmdList(verbose)
 	case "read", "r":
 		cmdRead()
+	case "send":
+		cmdSend()
 	case "all", "a":
 		lineCount := intArg(2, 30)
 		cmdAll(lineCount)
@@ -205,6 +207,73 @@ func cmdRead() {
 	fmt.Println(tailLines(result.Contents, lines))
 }
 
+func cmdSend() {
+	// Parse: send [--keys] [WINDOW_ID] TAB PANE COMMAND...
+	// Accepts prefixed IDs: W1234, T4, P2
+	args := os.Args[2:]
+
+	// Check for --keys flag
+	keysMode := false
+	if len(args) > 0 && args[0] == "--keys" {
+		keysMode = true
+		args = args[1:]
+	}
+
+	var windowID, tab, pane int
+	var commandStart int
+
+	switch {
+	case len(args) >= 4:
+		firstArg := mustID(args[0], "window/tab")
+		hasWindowPrefix := len(args[0]) > 1 && (args[0][0] == 'W' || args[0][0] == 'w')
+		if firstArg > 100 || hasWindowPrefix {
+			windowID = firstArg
+			tab = mustID(args[1], "tab")
+			pane = mustID(args[2], "pane")
+			commandStart = 3
+		} else {
+			tab = firstArg
+			pane = mustID(args[1], "pane")
+			commandStart = 2
+		}
+	case len(args) >= 3:
+		tab = mustID(args[0], "tab")
+		pane = mustID(args[1], "pane")
+		commandStart = 2
+	default:
+		fmt.Fprintln(os.Stderr, "usage: spyterm send [--keys] [W<id>] <T>tab <P>pane <command/keys...>")
+		os.Exit(1)
+	}
+
+	remaining := args[commandStart:]
+	if len(remaining) == 0 {
+		fmt.Fprintln(os.Stderr, "error: no command or keys specified")
+		os.Exit(1)
+	}
+
+	// If no window ID, resolve from first matching tab+pane
+	if windowID == 0 {
+		target, err := readPane(0, tab, pane)
+		if err != nil {
+			fatal(err)
+		}
+		windowID = target.WindowID
+	}
+
+	if keysMode {
+		if err := sendKeysToPane(windowID, tab, pane, remaining); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("sent keys to W%d T%d P%d: %s\n", windowID, tab, pane, strings.Join(remaining, " "))
+	} else {
+		command := strings.Join(remaining, " ")
+		if err := sendToPane(windowID, tab, pane, command); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("sent to W%d T%d P%d: %s\n", windowID, tab, pane, command)
+	}
+}
+
 func cmdAll(lines int) {
 	panes, err := listPanes()
 	if err != nil {
@@ -225,6 +294,8 @@ Usage:
   spyterm siblings [N]       Read last N lines from sibling panes (same tab)
   spyterm list [-v]           Show all windows/tabs/panes (-v for content)
   spyterm read [W] T P [N]   Read pane (accepts W1234/1234, T4/4, P2/2)
+  spyterm send [W] T P CMD   Send a command to a pane (text + Enter)
+  spyterm send --keys T P K  Send raw keys (^C, ^D, ^Z, ^[, etc.)
   spyterm all [N]            Read last N lines from ALL panes
   spyterm version            Show version
 

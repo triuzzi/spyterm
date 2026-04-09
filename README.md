@@ -26,6 +26,8 @@ spyterm                    # read sibling panes (default)
 spyterm siblings [N]       # last N lines from sibling panes (default 80)
 spyterm list [-v]          # show all windows/tabs/panes (-v for content)
 spyterm read [W] T P [N]   # read a specific pane
+spyterm send [W] T P CMD   # send a command to a pane (text + Enter)
+spyterm send --keys T P K  # send raw keys (^C, ^D, ^Z, ^[, etc.)
 spyterm all [N]            # read all panes
 ```
 
@@ -38,17 +40,17 @@ which tab it's running in by walking the process tree to find its TTY, then read
 the other panes in that tab.
 
 ```
-┌──────────────────────┬──────────────────────┐
-│  Claude Code         │  npm run dev         │
-│  (this session)      │  (sibling pane)      │
-│                      │                      │
-│  > /spyterm          │  Error: Cannot find  │
-│  reads ────────────> │  module 'foo'        │
-│                      │                      │
-├──────────────────────┤                      │
-│  npm run proxy       │                      │
-│  (sibling pane)      │                      │
-└──────────────────────┴──────────────────────┘
+┌───────────────────────┬──────────────────────┐
+│  Claude Code          │  npm run dev         │
+│  (this session)       │  (sibling pane)      │
+│                       │                      │
+│  > /spyterm           │  Error: Cannot find  │
+│  reads ────────────>  │  module 'foo'        │
+│                       │                      │
+├───────────────────────┤                      │
+│  npm run proxy        │                      │
+│  (sibling pane)       │                      │
+└───────────────────────┴──────────────────────┘
 ```
 
 ### Aliases
@@ -59,6 +61,25 @@ the other panes in that tab.
 | `list` | `ls` |
 | `read` | `r` |
 | `all` | `a` |
+
+## Security
+
+The `send` command lets you (or an AI agent) execute arbitrary commands in other
+iTerm2 terminal sessions. This is powerful — an agent can restart a crashed dev
+server or send Ctrl+C to a hung process — but it means any tool calling
+`spyterm send` can type into your other panes as if it were you at the keyboard.
+
+The permission boundary lives at the agent/skill level, not in spyterm itself:
+
+- **Claude Code** gates bash commands behind user approval by default.
+- The [spyterm skill](skill/SKILL.md) instructs agents to always ask for
+  confirmation before sending commands, even when running with
+  `--dangerously-skip-permissions`.
+- Read-only commands (`siblings`, `list`, `read`, `all`) carry no write risk.
+
+If you only need observation, you never have to use `send`. If you do use it,
+understand that anything an agent sends will execute with your shell's full
+privileges in the target pane.
 
 ## License
 
