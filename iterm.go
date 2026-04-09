@@ -157,6 +157,89 @@ func readPane(windowID, tab, paneIndex int) (*Pane, error) {
 	return nil, fmt.Errorf("pane W%d T%d P%d not found", windowID, tab, paneIndex)
 }
 
+// sendToPane sends a text command to a specific pane via AppleScript.
+// The text is sent followed by Enter (newline).
+func sendToPane(windowID, tab, paneIndex int, text string) error {
+	// Escape backslashes and quotes for AppleScript string
+	escaped := strings.ReplaceAll(text, "\\", "\\\\")
+	escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
+
+	script := fmt.Sprintf(`
+tell application "iTerm2"
+	set targetWindow to (first window whose id is %d)
+	set targetSession to session %d of tab %d of targetWindow
+	tell targetSession
+		write text "%s"
+	end tell
+end tell
+`, windowID, paneIndex, tab, escaped)
+
+	_, err := runAppleScript(script)
+	return err
+}
+
+// sendKeysToPane sends raw key sequences to a pane without appending Enter.
+// Keys are specified as a sequence of key names separated by spaces.
+// Uses Unix caret notation: ^C (Ctrl+C), ^D (Ctrl+D), ^Z (Ctrl+Z), etc.
+func sendKeysToPane(windowID, tab, paneIndex int, keys []string) error {
+	var parts []string
+	for _, key := range keys {
+		charID := resolveKey(key)
+		if charID >= 0 {
+			parts = append(parts, fmt.Sprintf("character id %d", charID))
+		} else {
+			// Literal string — escape and quote it
+			escaped := strings.ReplaceAll(key, "\\", "\\\\")
+			escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
+			parts = append(parts, fmt.Sprintf("\"%s\"", escaped))
+		}
+	}
+
+	payload := strings.Join(parts, " & ")
+	script := fmt.Sprintf(`
+tell application "iTerm2"
+	set targetWindow to (first window whose id is %d)
+	set targetSession to session %d of tab %d of targetWindow
+	tell targetSession
+		write text (%s) newline no
+	end tell
+end tell
+`, windowID, paneIndex, tab, payload)
+
+	_, err := runAppleScript(script)
+	return err
+}
+
+// resolveKey maps a key name to an ASCII character code, or -1 if not a known key.
+// Uses Unix caret notation: ^A through ^Z, ^[, ^\, ^], ^^, ^_
+func resolveKey(key string) int {
+	// Caret notation: ^C, ^D, ^Z, etc.
+	if len(key) == 2 && key[0] == '^' {
+		char := key[1]
+		if char >= 'A' && char <= 'Z' {
+			return int(char - 'A' + 1)
+		}
+		if char >= 'a' && char <= 'z' {
+			return int(char - 'a' + 1)
+		}
+		switch char {
+		case '[':
+			return 27 // Escape
+		case '\\':
+			return 28 // SIGQUIT
+		case ']':
+			return 29
+		case '^':
+			return 30
+		case '_':
+			return 31
+		case '?':
+			return 127 // Delete/Backspace
+		}
+	}
+	return -1
+}
+
 // tailLines returns the last n lines of text. If n <= 0, returns all lines.
 func tailLines(text string, lineCount int) string {
 	if lineCount <= 0 {
