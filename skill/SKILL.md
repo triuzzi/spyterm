@@ -44,6 +44,9 @@ spyterm send --keys T5 P2 ^C            # Ctrl+C (interrupt)
 spyterm send --keys T5 P2 ^D            # Ctrl+D (EOF)
 spyterm send --keys T5 P2 ^Z            # Ctrl+Z (suspend)
 spyterm send --keys T5 P2 ^[            # Escape
+
+# Send text + raw Enter in one call (REQUIRED for TUI targets):
+spyterm send --keys T5 P2 "some text" ^M  # types text then ^M (carriage return)
 ```
 
 Common workflow — restart a dev server:
@@ -53,6 +56,54 @@ spyterm send T5 P2 npm run dev          # start it again
 ```
 
 Use `spyterm list` first to find the right pane target.
+
+#### Gotcha: `\n` vs `\r` — TUI targets need `^M`, not plain `send`
+
+Plain `spyterm send T P "<text>"` invokes iTerm2's `write text "..."` which appends `\n` (newline / line feed / ASCII 10). **Shells happen to treat `\n` as line submit, so this works for shell commands.** But TUI applications running in raw mode (Claude Code, vim, fzf, less, htop, etc.) distinguish `\n` from `\r` — they only treat `\r` (carriage return / ASCII 13 / `^M`) as Enter. So plain `send` will type the text into the TUI's input box but **never submit it** — the prompt sits in INSERT mode.
+
+This is NOT a multi-byte UTF-8 / em-dash issue. iTerm2's `write text` handles UTF-8 fine. The cause is purely the `\n` vs `\r` distinction at the TUI input-handler level.
+
+**Right pattern for TUI targets:** use `--keys` with the text and `^M` together:
+
+```bash
+spyterm send --keys T5 P2 "Read /tmp/brief.md and execute" ^M
+```
+
+`send --keys` accepts a mix of literal strings and key tokens (`^M`, `^C`, etc.). Anything that doesn't match `^X`/special-key notation is treated as a literal string. The text is typed, then `^M` (= `character id 13` = carriage return) submits.
+
+**Wrong patterns that look right but silently leave the prompt unsubmitted:**
+
+```bash
+spyterm send T5 P2 "Read /tmp/brief.md..."   # types text but TUI never sees Enter
+spyterm send T5 P2 "Read /tmp/brief.md..."   # then chase with ^M as a 2nd call —
+spyterm send --keys T5 P2 ^M                  #   works, but two calls is fragile (race risk)
+```
+
+#### Gotcha: race condition when omitting window ID
+
+`spyterm send` (and `send --keys`) without an explicit window ID calls `listPanes()` to resolve which window the target pane is in. The list AppleScript does:
+
+```applescript
+repeat with t from 1 to (count of tabs of w)
+  set theTab to tab t of w
+  ...
+```
+
+`(count of tabs of w)` is snapshotted at loop entry. If a tab is closed during iteration (the user closes a tab manually, an iTerm session ends, etc.), the loop tries to access a now-invalid index and errors with:
+
+```
+Can't get tab N of item 1 of every window. Invalid index. (-1719)
+```
+
+(`item 1 of every window` is how AppleScript serializes the loop variable in the error.)
+
+**Mitigation:** when you know the window ID (`spyterm list` shows it as `W80135`), pass it explicitly to skip the listPanes resolution:
+
+```bash
+spyterm send --keys W80135 T9 P2 ^M    # explicit W → no race
+```
+
+This race is most likely to fire when sending multiple commands in quick succession (the first command's UI update can overlap with the second's listPanes call).
 
 ### `/spyterm list`
 
