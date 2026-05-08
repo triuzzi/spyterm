@@ -158,7 +158,11 @@ func readPane(windowID, tab, paneIndex int) (*Pane, error) {
 }
 
 // sendToPane sends a text command to a specific pane via AppleScript.
-// The text is sent followed by Enter (newline).
+// The text is sent followed by a carriage return (^M / ASCII 13), which both
+// shells (via the TTY's ICRNL flag) and raw-mode TUIs (Claude Code, vim, fzf,
+// less, htop, etc.) accept as Enter. iTerm2's default newline is \n (ASCII 10),
+// which shells cook as Enter but raw-mode TUIs ignore — so plain default would
+// leave TUI prompts typed-but-unsubmitted.
 func sendToPane(windowID, tab, paneIndex int, text string) error {
 	// Escape backslashes and quotes for AppleScript string
 	escaped := strings.ReplaceAll(text, "\\", "\\\\")
@@ -169,7 +173,7 @@ tell application "iTerm2"
 	set targetWindow to (first window whose id is %d)
 	set targetSession to session %d of tab %d of targetWindow
 	tell targetSession
-		write text "%s"
+		write text ("%s" & (character id 13)) newline no
 	end tell
 end tell
 `, windowID, paneIndex, tab, escaped)
