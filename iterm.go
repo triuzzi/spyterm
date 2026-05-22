@@ -22,14 +22,15 @@ func runAppleScript(script string, args ...string) (string, error) {
 
 // Pane represents one iTerm2 session (split pane).
 type Pane struct {
-	WindowID   int
-	WindowName string
-	Tab        int
-	Index      int // 1-based pane index within the tab
-	Total      int // total panes in the tab
-	TTY        string
-	Name       string // session name (current process/directory)
-	Contents   string
+	WindowID     int
+	WindowName   string
+	Tab          int
+	Index        int    // 1-based pane index within the tab
+	Total        int    // total panes in the tab
+	TTY          string
+	Name         string // session name (current process/directory)
+	SessionID    string // iTerm2's stable session identifier (immune to index reshuffling)
+	Contents     string
 }
 
 func (pane Pane) Label() string {
@@ -38,25 +39,44 @@ func (pane Pane) Label() string {
 
 const recordSep = "<<ITERM_PANE_RECORD>>"
 
+// listScript enumerates every pane in every tab in every window using
+// reference-based iteration (`repeat with x in collection`) and per-element
+// `try` blocks. Reference iteration holds a stable handle to each element even
+// if other elements in the collection mutate mid-loop, and the inner `try`
+// blocks swallow individual failures so one vanishing pane never blows up the
+// whole listing. This eliminates the -1719 ("Invalid index") TOCTOU race that
+// the previous index-based loop (`repeat with t from 1 to count`) was prone to.
 const listScript = `
 set sep to "<<ITERM_PANE_RECORD>>"
 set delim to character id 9
 tell application "iTerm2"
 	set output to ""
-	repeat with w in windows
-		set wid to id of w
-		set wname to name of w
-		repeat with t from 1 to (count of tabs of w)
-			set theTab to tab t of w
-			set sc to count of sessions of theTab
-			repeat with i from 1 to sc
-				set s to session i of theTab
-				set theTTY to tty of s as text
-				set sname to name of s
-				set output to output & sep & wid & delim & wname & delim & t & delim & i & delim & sc & delim & theTTY & delim & sname & linefeed & (contents of s)
-			end repeat
+	try
+		repeat with w in windows
+			try
+				set wid to id of w
+				set wname to name of w
+				set tabIndex to 0
+				repeat with theTab in tabs of w
+					try
+						set tabIndex to tabIndex + 1
+						set sessIndex to 0
+						set sessList to sessions of theTab
+						set sc to count of sessList
+						repeat with s in sessList
+							try
+								set sessIndex to sessIndex + 1
+								set theTTY to tty of s as text
+								set sname to name of s
+								set suid to id of s
+								set output to output & sep & wid & delim & wname & delim & tabIndex & delim & sessIndex & delim & sc & delim & theTTY & delim & sname & delim & suid & linefeed & (contents of s)
+							end try
+						end repeat
+					end try
+				end repeat
+			end try
 		end repeat
-	end repeat
+	end try
 	return output
 end tell
 `
@@ -80,8 +100,8 @@ func listPanes() ([]Pane, error) {
 		}
 		meta := record[:newline]
 		content := record[newline+1:]
-		parts := strings.SplitN(meta, "\t", 7)
-		if len(parts) < 7 {
+		parts := strings.SplitN(meta, "\t", 8)
+		if len(parts) < 8 {
 			continue
 		}
 		windowID, _ := strconv.Atoi(parts[0])
@@ -91,6 +111,7 @@ func listPanes() ([]Pane, error) {
 		total, _ := strconv.Atoi(parts[4])
 		tty := parts[5]
 		name := parts[6]
+		sessionID := parts[7]
 		panes = append(panes, Pane{
 			WindowID:   windowID,
 			WindowName: windowName,
@@ -99,6 +120,7 @@ func listPanes() ([]Pane, error) {
 			Total:      total,
 			TTY:        tty,
 			Name:       name,
+			SessionID:  sessionID,
 			Contents:   content,
 		})
 	}
@@ -157,58 +179,78 @@ func readPane(windowID, tab, paneIndex int) (*Pane, error) {
 	return nil, fmt.Errorf("pane W%d T%d P%d not found", windowID, tab, paneIndex)
 }
 
-// sendToPane sends a text command to a specific pane via AppleScript.
+// findSessionByIDScript locates a session by its stable iTerm2 session ID and
+// executes a write inside the matched session's tell block. The session ID is
+// immune to tab/pane reordering, so this never raises -1719 ("Invalid index")
+// even if the user closed an unrelated pane between listing and sending.
+// On no match, raises a clear error instead of a numeric AppleScript code.
+const findSessionByIDScript = `
+on findAndSend(targetID, payload)
+	tell application "iTerm2"
+		repeat with w in windows
+			try
+				repeat with t in tabs of w
+					try
+						repeat with s in sessions of t
+							try
+								if (id of s) is targetID then
+									tell s to write text payload newline no
+									return
+								end if
+							end try
+						end repeat
+					end try
+				end repeat
+			end try
+		end repeat
+	end tell
+	error "session with id " & targetID & " no longer exists"
+end findAndSend
+`
+
+// sendToPane sends a text command to a specific pane addressed by SessionID.
 // The text is sent followed by a carriage return (^M / ASCII 13), which both
 // shells (via the TTY's ICRNL flag) and raw-mode TUIs (Claude Code, vim, fzf,
 // less, htop, etc.) accept as Enter. iTerm2's default newline is \n (ASCII 10),
 // which shells cook as Enter but raw-mode TUIs ignore — so plain default would
 // leave TUI prompts typed-but-unsubmitted.
-func sendToPane(windowID, tab, paneIndex int, text string) error {
-	// Escape backslashes and quotes for AppleScript string
-	escaped := strings.ReplaceAll(text, "\\", "\\\\")
-	escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
+func sendToPane(sessionID, text string) error {
+	escapedID := strings.ReplaceAll(sessionID, "\\", "\\\\")
+	escapedID = strings.ReplaceAll(escapedID, "\"", "\\\"")
+	escapedText := strings.ReplaceAll(text, "\\", "\\\\")
+	escapedText = strings.ReplaceAll(escapedText, "\"", "\\\"")
 
-	script := fmt.Sprintf(`
-tell application "iTerm2"
-	set targetWindow to (first window whose id is %d)
-	set targetSession to session %d of tab %d of targetWindow
-	tell targetSession
-		write text ("%s" & (character id 13)) newline no
-	end tell
-end tell
-`, windowID, paneIndex, tab, escaped)
+	script := findSessionByIDScript + fmt.Sprintf(`
+findAndSend("%s", "%s" & (character id 13))
+`, escapedID, escapedText)
 
 	_, err := runAppleScript(script)
 	return err
 }
 
-// sendKeysToPane sends raw key sequences to a pane without appending Enter.
+// sendKeysToPane sends raw key sequences to a pane addressed by SessionID.
 // Keys are specified as a sequence of key names separated by spaces.
 // Uses Unix caret notation: ^C (Ctrl+C), ^D (Ctrl+D), ^Z (Ctrl+Z), etc.
-func sendKeysToPane(windowID, tab, paneIndex int, keys []string) error {
+func sendKeysToPane(sessionID string, keys []string) error {
 	var parts []string
 	for _, key := range keys {
 		charID := resolveKey(key)
 		if charID >= 0 {
 			parts = append(parts, fmt.Sprintf("character id %d", charID))
 		} else {
-			// Literal string — escape and quote it
 			escaped := strings.ReplaceAll(key, "\\", "\\\\")
 			escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
 			parts = append(parts, fmt.Sprintf("\"%s\"", escaped))
 		}
 	}
 
+	escapedID := strings.ReplaceAll(sessionID, "\\", "\\\\")
+	escapedID = strings.ReplaceAll(escapedID, "\"", "\\\"")
 	payload := strings.Join(parts, " & ")
-	script := fmt.Sprintf(`
-tell application "iTerm2"
-	set targetWindow to (first window whose id is %d)
-	set targetSession to session %d of tab %d of targetWindow
-	tell targetSession
-		write text (%s) newline no
-	end tell
-end tell
-`, windowID, paneIndex, tab, payload)
+
+	script := findSessionByIDScript + fmt.Sprintf(`
+findAndSend("%s", %s)
+`, escapedID, payload)
 
 	_, err := runAppleScript(script)
 	return err
