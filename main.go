@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -251,23 +251,23 @@ func cmdSend() {
 		os.Exit(1)
 	}
 
-	// If no window ID, resolve from first matching tab+pane
-	if windowID == 0 {
-		target, err := readPane(0, tab, pane)
-		if err != nil {
-			fatal(err)
-		}
-		windowID = target.WindowID
+	// Resolve indices → stable SessionID. This is the only addressing
+	// that survives concurrent topology changes; sending by index is a
+	// TOCTOU race against the user closing/opening panes in another tab.
+	target, err := readPane(windowID, tab, pane)
+	if err != nil {
+		fatal(err)
 	}
+	windowID = target.WindowID
 
 	if keysMode {
-		if err := sendKeysToPane(windowID, tab, pane, remaining); err != nil {
+		if err := sendKeysToPane(target.SessionID, remaining); err != nil {
 			fatal(err)
 		}
 		fmt.Printf("sent keys to W%d T%d P%d: %s\n", windowID, tab, pane, strings.Join(remaining, " "))
 	} else {
 		command := strings.Join(remaining, " ")
-		if err := sendToPane(windowID, tab, pane, command); err != nil {
+		if err := sendToPane(target.SessionID, command); err != nil {
 			fatal(err)
 		}
 		fmt.Printf("sent to W%d T%d P%d: %s\n", windowID, tab, pane, command)
