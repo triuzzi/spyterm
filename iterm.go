@@ -40,43 +40,36 @@ func (pane Pane) Label() string {
 const recordSep = "<<ITERM_PANE_RECORD>>"
 
 // listScript enumerates every pane in every tab in every window using
-// reference-based iteration (`repeat with x in collection`) and per-element
-// `try` blocks. Reference iteration holds a stable handle to each element even
-// if other elements in the collection mutate mid-loop, and the inner `try`
-// blocks swallow individual failures so one vanishing pane never blows up the
-// whole listing. This eliminates the -1719 ("Invalid index") TOCTOU race that
-// the previous index-based loop (`repeat with t from 1 to count`) was prone to.
+// reference-based iteration (`repeat with x in collection`). Reference
+// iteration keeps a stable handle to each element evaluated at the start of
+// the loop, avoiding the -1719 ("Invalid index") TOCTOU race that the
+// previous index-based loop (`repeat with t from 1 to count`) was prone to.
+// No `try` blocks: if a tab/session vanishes mid-iteration the script fails
+// loudly so the caller knows the listing is incomplete instead of receiving
+// a silently truncated result.
 const listScript = `
 set sep to "<<ITERM_PANE_RECORD>>"
 set delim to character id 9
 tell application "iTerm2"
 	set output to ""
-	try
-		repeat with w in windows
-			try
-				set wid to id of w
-				set wname to name of w
-				set tabIndex to 0
-				repeat with theTab in tabs of w
-					try
-						set tabIndex to tabIndex + 1
-						set sessIndex to 0
-						set sessList to sessions of theTab
-						set sc to count of sessList
-						repeat with s in sessList
-							try
-								set sessIndex to sessIndex + 1
-								set theTTY to tty of s as text
-								set sname to name of s
-								set suid to id of s
-								set output to output & sep & wid & delim & wname & delim & tabIndex & delim & sessIndex & delim & sc & delim & theTTY & delim & sname & delim & suid & linefeed & (contents of s)
-							end try
-						end repeat
-					end try
-				end repeat
-			end try
+	repeat with w in windows
+		set wid to id of w
+		set wname to name of w
+		set tabIndex to 0
+		repeat with theTab in tabs of w
+			set tabIndex to tabIndex + 1
+			set sessIndex to 0
+			set sessList to sessions of theTab
+			set sc to count of sessList
+			repeat with s in sessList
+				set sessIndex to sessIndex + 1
+				set theTTY to tty of s as text
+				set sname to name of s
+				set suid to id of s
+				set output to output & sep & wid & delim & wname & delim & tabIndex & delim & sessIndex & delim & sc & delim & theTTY & delim & sname & delim & suid & linefeed & (contents of s)
+			end repeat
 		end repeat
-	end try
+	end repeat
 	return output
 end tell
 `
@@ -182,26 +175,22 @@ func readPane(windowID, tab, paneIndex int) (*Pane, error) {
 // findSessionByIDScript locates a session by its stable iTerm2 session ID and
 // executes a write inside the matched session's tell block. The session ID is
 // immune to tab/pane reordering, so this never raises -1719 ("Invalid index")
-// even if the user closed an unrelated pane between listing and sending.
-// On no match, raises a clear error instead of a numeric AppleScript code.
+// from the addressing itself. No `try` blocks during traversal: a vanishing
+// tab/session mid-walk surfaces loudly instead of being silently skipped,
+// which would mask the failure as a misleading "session no longer exists".
+// The final `error` fires only when the walk completes without finding the id.
 const findSessionByIDScript = `
 on findAndSend(targetID, payload)
 	tell application "iTerm2"
 		repeat with w in windows
-			try
-				repeat with t in tabs of w
-					try
-						repeat with s in sessions of t
-							try
-								if (id of s) is targetID then
-									tell s to write text payload newline no
-									return
-								end if
-							end try
-						end repeat
-					end try
+			repeat with t in tabs of w
+				repeat with s in sessions of t
+					if (id of s) is targetID then
+						tell s to write text payload newline no
+						return
+					end if
 				end repeat
-			end try
+			end repeat
 		end repeat
 	end tell
 	error "session with id " & targetID & " no longer exists"
