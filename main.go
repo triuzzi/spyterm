@@ -172,35 +172,14 @@ func cmdList(verbose bool) {
 }
 
 func cmdRead() {
-	// Parse: read [WINDOW_ID] TAB PANE [LINES]
-	// Accepts W1234/1234, T4/4, P10/10 prefixed or plain numeric forms.
+	// Parse: read [W<id>] TAB PANE [LINES] — accepts W1234/1234, T4/4, P10/10.
 	args := os.Args[2:]
-	var windowID, tab, pane, lines int
-
-	switch {
-	case len(args) >= 3:
-		firstArg := mustID(args[0], "window/tab")
-		// Window IDs are large numbers (>1000); tab indices are small.
-		// A W/w prefix also signals a window ID regardless of value.
-		hasWindowPrefix := len(args[0]) > 1 && (args[0][0] == 'W' || args[0][0] == 'w')
-		if firstArg > 100 || hasWindowPrefix {
-			windowID = firstArg
-			tab = mustID(args[1], "tab")
-			pane = mustID(args[2], "pane")
-			lines = intArgFromSlice(args, 3, 50)
-		} else {
-			tab = firstArg
-			pane = mustID(args[1], "pane")
-			lines = intArgFromSlice(args, 2, 50)
-		}
-	case len(args) == 2:
-		tab = mustID(args[0], "tab")
-		pane = mustID(args[1], "pane")
-		lines = 50
-	default:
+	windowID, tab, pane, rest, ok := parsePaneAddress(args)
+	if !ok {
 		fmt.Fprintln(os.Stderr, "usage: spyterm read [W<id>] <T>tab <P>pane [lines]")
 		os.Exit(1)
 	}
+	lines := intArgFromSlice(args, rest, 50)
 
 	result, err := readPane(windowID, tab, pane)
 	if err != nil {
@@ -221,28 +200,8 @@ func cmdSend() {
 		args = args[1:]
 	}
 
-	var windowID, tab, pane int
-	var commandStart int
-
-	switch {
-	case len(args) >= 4:
-		firstArg := mustID(args[0], "window/tab")
-		hasWindowPrefix := len(args[0]) > 1 && (args[0][0] == 'W' || args[0][0] == 'w')
-		if firstArg > 100 || hasWindowPrefix {
-			windowID = firstArg
-			tab = mustID(args[1], "tab")
-			pane = mustID(args[2], "pane")
-			commandStart = 3
-		} else {
-			tab = firstArg
-			pane = mustID(args[1], "pane")
-			commandStart = 2
-		}
-	case len(args) >= 3:
-		tab = mustID(args[0], "tab")
-		pane = mustID(args[1], "pane")
-		commandStart = 2
-	default:
+	windowID, tab, pane, commandStart, ok := parsePaneAddress(args)
+	if !ok {
 		fmt.Fprintln(os.Stderr, "usage: spyterm send [--keys] [W<id>] <T>tab <P>pane <command/keys...>")
 		os.Exit(1)
 	}
@@ -294,7 +253,7 @@ func cmdSplit() {
 	}
 	rest := args[1:]
 
-	windowID, tab, pane, commandStart, haveTarget := parseSplitTarget(rest)
+	windowID, tab, pane, commandStart, haveTarget := parsePaneAddress(rest)
 
 	var target *Pane
 	if haveTarget {
@@ -324,18 +283,18 @@ func cmdSplit() {
 	}
 
 	// Resolve the new session back to a W/T/P label so the caller has a
-	// race-free target to read from or send to next.
-	label := "?"
-	if newPane := paneBySessionID(newSessionID); newPane != nil {
-		label = newPane.Label()
+	// human-readable handle to read from or send to next.
+	newPane, err := paneBySessionID(newSessionID)
+	if err != nil {
+		fatal(err)
 	}
 
 	orientation := "horizontally (stacked below)"
-	if direction == "vertically" {
+	if direction == directionVertical {
 		orientation = "vertically (side by side)"
 	}
 
-	fmt.Printf("split %s %s → new pane %s (tty %s)\n", target.Label(), orientation, label, newTTY)
+	fmt.Printf("split %s %s → new pane %s (tty %s)\n", target.Label(), orientation, newPane.Label(), newTTY)
 
 	if command != "" {
 		if err := sendToPane(newSessionID, command); err != nil {
@@ -373,8 +332,8 @@ Usage:
 
 Aliases: siblings=s, list=ls, read=r, all=a
 
-Split: v=vertical (side by side), h=horizontal (stacked). Focus stays on the
-current pane. Splits the current pane unless a W/T/P target is given.
+Split: v=vertical (side by side), h=horizontal (stacked). Splits the current
+pane by default, or a W/T/P target; focus stays on the pane that was split.
 
 Examples:
   spyterm                    # see what's in your split panes
@@ -410,37 +369,44 @@ func intArgFromSlice(args []string, index, defaultValue int) int {
 	return value
 }
 
+// directionVertical and directionHorizontal are iTerm2's AppleScript split
+// verbs. Kept as named constants so parseDirection's return, cmdSplit's
+// orientation label, and splitPane's interpolated verb can't drift apart.
+const (
+	directionVertical   = "vertically"
+	directionHorizontal = "horizontally"
+)
+
 // parseDirection maps a split-direction shorthand to iTerm2's AppleScript verb.
 // Vertical means side by side (new pane to the right); horizontal means stacked
 // (new pane below) — matching iTerm2's own naming and Cmd+D / Cmd+Shift+D.
 func parseDirection(text string) (string, error) {
 	switch strings.ToLower(text) {
 	case "v", "vertical", "vertically":
-		return "vertically", nil
+		return directionVertical, nil
 	case "h", "horizontal", "horizontally":
-		return "horizontally", nil
+		return directionHorizontal, nil
 	}
 	return "", fmt.Errorf("invalid split direction %q (use v/vertical or h/horizontal)", text)
 }
 
-// parseSplitTarget interprets the args after the direction as an optional
-// [W] T P pane target followed by an optional command. A target requires at
-// least two leading ID tokens (T P); if the first arg is not an ID token there
-// is no target and the whole slice is a command for the current pane. Mirrors
-// the read/send window-vs-tab heuristic: a first token >100 or W-prefixed with
-// a third ID token present is treated as a window ID.
-func parseSplitTarget(args []string) (windowID, tab, pane, commandStart int, haveTarget bool) {
+// parsePaneAddress interprets leading args as an optional [W] T P pane address,
+// returning the parsed indices, the index where the remaining args begin, and
+// ok=false when the leading args don't form a valid T P (or W T P) address. It
+// is the single source of the read/send/split window-vs-tab heuristic: a first
+// token >100 or W-prefixed, with a third ID token present, is a window ID;
+// otherwise the first two tokens are the tab and pane.
+func parsePaneAddress(args []string) (windowID, tab, pane, rest int, ok bool) {
 	if len(args) < 2 || !isIDToken(args[0]) || !isIDToken(args[1]) {
 		return 0, 0, 0, 0, false
 	}
 	first, _ := parseID(args[0])
+	second, _ := parseID(args[1])
 	hasWindowPrefix := len(args[0]) > 1 && (args[0][0] == 'W' || args[0][0] == 'w')
 	if (first > 100 || hasWindowPrefix) && len(args) >= 3 && isIDToken(args[2]) {
-		second, _ := parseID(args[1])
 		third, _ := parseID(args[2])
 		return first, second, third, 3, true
 	}
-	second, _ := parseID(args[1])
 	return 0, first, second, 2, true
 }
 
@@ -461,15 +427,6 @@ func parseID(text string) (int, error) {
 		}
 	}
 	return strconv.Atoi(text)
-}
-
-func mustID(text, name string) int {
-	value, err := parseID(text)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "invalid %s: %s\n", name, text)
-		os.Exit(1)
-	}
-	return value
 }
 
 func fatal(err error) {

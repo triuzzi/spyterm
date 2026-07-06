@@ -52,8 +52,9 @@ spyterm split v W35267 T6 P2     # split a specific pane instead of the current 
 - The new pane **inherits the source pane's working directory**, so splitting to run
   project commands lands you in the right place regardless of your profile's
   working-directory setting.
-- **Focus stays on the current pane** — the split happens in the background, so an
-  assistant can create and drive a pane without stealing your cursor.
+- **Focus stays on the pane that was split** (the current pane by default) — so an
+  assistant can create and drive a pane in the background without stealing your cursor.
+  (A `W/T/P` target focuses that target pane.)
 - The command prints the new pane's `W/T/P` label so you can `read` or `send` to it
   next.
 

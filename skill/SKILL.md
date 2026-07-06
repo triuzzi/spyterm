@@ -121,8 +121,9 @@ spyterm split v W35267 T6 P2    # split a specific pane instead of the current o
   Cmd+D / Cmd+Shift+D naming (vertical divider vs horizontal divider).
 - The new pane **inherits the source pane's working directory**, so `spyterm split h npm run dev`
   runs in the right project directory without a manual `cd`.
-- **Focus stays on the current pane** — the split is created in the background, so you
-  can keep working where you are.
+- **Focus stays on the pane that was split** (the current pane by default) — the split
+  is created in the background, so you can keep working where you are. (A `W/T/P` target
+  focuses that target pane instead.)
 - The command prints the new pane's `W/T/P` label (e.g. `new pane W83 T9 P2/2`). Note the
   new pane's index can shift existing panes; use the printed label (or `spyterm list`) to
   target it with `read`/`send` afterward.
