@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const version = "0.3.1"
+const version = "0.4.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -32,6 +32,8 @@ func main() {
 		cmdRead()
 	case "send":
 		cmdSend()
+	case "split":
+		cmdSplit()
 	case "all", "a":
 		lineCount := intArg(2, 30)
 		cmdAll(lineCount)
@@ -170,35 +172,14 @@ func cmdList(verbose bool) {
 }
 
 func cmdRead() {
-	// Parse: read [WINDOW_ID] TAB PANE [LINES]
-	// Accepts W1234/1234, T4/4, P10/10 prefixed or plain numeric forms.
+	// Parse: read [W<id>] TAB PANE [LINES] — accepts W1234/1234, T4/4, P10/10.
 	args := os.Args[2:]
-	var windowID, tab, pane, lines int
-
-	switch {
-	case len(args) >= 3:
-		firstArg := mustID(args[0], "window/tab")
-		// Window IDs are large numbers (>1000); tab indices are small.
-		// A W/w prefix also signals a window ID regardless of value.
-		hasWindowPrefix := len(args[0]) > 1 && (args[0][0] == 'W' || args[0][0] == 'w')
-		if firstArg > 100 || hasWindowPrefix {
-			windowID = firstArg
-			tab = mustID(args[1], "tab")
-			pane = mustID(args[2], "pane")
-			lines = intArgFromSlice(args, 3, 50)
-		} else {
-			tab = firstArg
-			pane = mustID(args[1], "pane")
-			lines = intArgFromSlice(args, 2, 50)
-		}
-	case len(args) == 2:
-		tab = mustID(args[0], "tab")
-		pane = mustID(args[1], "pane")
-		lines = 50
-	default:
+	windowID, tab, pane, rest, ok := parsePaneAddress(args)
+	if !ok {
 		fmt.Fprintln(os.Stderr, "usage: spyterm read [W<id>] <T>tab <P>pane [lines]")
 		os.Exit(1)
 	}
+	lines := intArgFromSlice(args, rest, 50)
 
 	result, err := readPane(windowID, tab, pane)
 	if err != nil {
@@ -219,28 +200,8 @@ func cmdSend() {
 		args = args[1:]
 	}
 
-	var windowID, tab, pane int
-	var commandStart int
-
-	switch {
-	case len(args) >= 4:
-		firstArg := mustID(args[0], "window/tab")
-		hasWindowPrefix := len(args[0]) > 1 && (args[0][0] == 'W' || args[0][0] == 'w')
-		if firstArg > 100 || hasWindowPrefix {
-			windowID = firstArg
-			tab = mustID(args[1], "tab")
-			pane = mustID(args[2], "pane")
-			commandStart = 3
-		} else {
-			tab = firstArg
-			pane = mustID(args[1], "pane")
-			commandStart = 2
-		}
-	case len(args) >= 3:
-		tab = mustID(args[0], "tab")
-		pane = mustID(args[1], "pane")
-		commandStart = 2
-	default:
+	windowID, tab, pane, commandStart, ok := parsePaneAddress(args)
+	if !ok {
 		fmt.Fprintln(os.Stderr, "usage: spyterm send [--keys] [W<id>] <T>tab <P>pane <command/keys...>")
 		os.Exit(1)
 	}
@@ -274,6 +235,75 @@ func cmdSend() {
 	}
 }
 
+func cmdSplit() {
+	// Parse: split <v|h> [W T P] [command...]
+	// With no target, splits the current pane (the one spyterm runs inside).
+	// With a W/T/P target, splits that pane. Any trailing args form a command
+	// run in the new pane. Prefix IDs (W35267 T6 P2) when combining a target
+	// with a command whose first word could be mistaken for a pane number.
+	args := os.Args[2:]
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: spyterm split <v|h> [W<id>] [T<tab> P<pane>] [command...]")
+		os.Exit(1)
+	}
+
+	direction, err := parseDirection(args[0])
+	if err != nil {
+		fatal(err)
+	}
+	rest := args[1:]
+
+	windowID, tab, pane, commandStart, haveTarget := parsePaneAddress(rest)
+
+	var target *Pane
+	if haveTarget {
+		// Resolve indices → stable SessionID, same as send: addressing the
+		// split by index is a TOCTOU race against concurrent topology changes.
+		target, err = readPane(windowID, tab, pane)
+		if err != nil {
+			fatal(err)
+		}
+	} else {
+		tty, err := findTTY()
+		if err != nil {
+			fatal(err)
+		}
+		target, err = paneByTTY(tty)
+		if err != nil {
+			fatal(err)
+		}
+		commandStart = 0
+	}
+
+	command := strings.Join(rest[commandStart:], " ")
+
+	newSessionID, newTTY, err := splitPane(target.SessionID, direction)
+	if err != nil {
+		fatal(err)
+	}
+
+	// Resolve the new session back to a W/T/P label so the caller has a
+	// human-readable handle to read from or send to next.
+	newPane, err := paneBySessionID(newSessionID)
+	if err != nil {
+		fatal(err)
+	}
+
+	orientation := "horizontally (stacked below)"
+	if direction == directionVertical {
+		orientation = "vertically (side by side)"
+	}
+
+	fmt.Printf("split %s %s → new pane %s (tty %s)\n", target.Label(), orientation, newPane.Label(), newTTY)
+
+	if command != "" {
+		if err := sendToPane(newSessionID, command); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("ran in new pane: %s\n", command)
+	}
+}
+
 func cmdAll(lines int) {
 	panes, err := listPanes()
 	if err != nil {
@@ -296,16 +326,23 @@ Usage:
   spyterm read [W] T P [N]   Read pane (accepts W1234/1234, T4/4, P2/2)
   spyterm send [W] T P CMD   Send a command to a pane (text + Enter)
   spyterm send --keys T P K  Send raw keys (^C, ^D, ^Z, ^[, etc.)
+  spyterm split <v|h> [W T P] [CMD]  Split current (or target) pane; optional CMD
   spyterm all [N]            Read last N lines from ALL panes
   spyterm version            Show version
 
 Aliases: siblings=s, list=ls, read=r, all=a
+
+Split: v=vertical (side by side), h=horizontal (stacked). Splits the current
+pane by default, or a W/T/P target; focus stays on the pane that was split.
 
 Examples:
   spyterm                    # see what's in your split panes
   spyterm s 200              # last 200 lines from siblings
   spyterm read 6 3           # tab 6, pane 3, last 50 lines
   spyterm read 35267 6 3 100 # specific window, tab 6, pane 3, 100 lines
+  spyterm split v            # split current pane side by side
+  spyterm split h npm run dev # split below, run "npm run dev" in the new pane
+  spyterm split v W35267 T6 P2 # split a specific pane side by side
 `)
 }
 
@@ -332,6 +369,54 @@ func intArgFromSlice(args []string, index, defaultValue int) int {
 	return value
 }
 
+// directionVertical and directionHorizontal are iTerm2's AppleScript split
+// verbs. Kept as named constants so parseDirection's return, cmdSplit's
+// orientation label, and splitPane's interpolated verb can't drift apart.
+const (
+	directionVertical   = "vertically"
+	directionHorizontal = "horizontally"
+)
+
+// parseDirection maps a split-direction shorthand to iTerm2's AppleScript verb.
+// Vertical means side by side (new pane to the right); horizontal means stacked
+// (new pane below) — matching iTerm2's own naming and Cmd+D / Cmd+Shift+D.
+func parseDirection(text string) (string, error) {
+	switch strings.ToLower(text) {
+	case "v", "vertical", "vertically":
+		return directionVertical, nil
+	case "h", "horizontal", "horizontally":
+		return directionHorizontal, nil
+	}
+	return "", fmt.Errorf("invalid split direction %q (use v/vertical or h/horizontal)", text)
+}
+
+// parsePaneAddress interprets leading args as an optional [W] T P pane address,
+// returning the parsed indices, the index where the remaining args begin, and
+// ok=false when the leading args don't form a valid T P (or W T P) address. It
+// is the single source of the read/send/split window-vs-tab heuristic: a first
+// token >100 or W-prefixed, with a third ID token present, is a window ID;
+// otherwise the first two tokens are the tab and pane.
+func parsePaneAddress(args []string) (windowID, tab, pane, rest int, ok bool) {
+	if len(args) < 2 || !isIDToken(args[0]) || !isIDToken(args[1]) {
+		return 0, 0, 0, 0, false
+	}
+	first, _ := parseID(args[0])
+	second, _ := parseID(args[1])
+	hasWindowPrefix := len(args[0]) > 1 && (args[0][0] == 'W' || args[0][0] == 'w')
+	if (first > 100 || hasWindowPrefix) && len(args) >= 3 && isIDToken(args[2]) {
+		third, _ := parseID(args[2])
+		return first, second, third, 3, true
+	}
+	return 0, first, second, 2, true
+}
+
+// isIDToken reports whether text is a valid pane-address token: a plain integer
+// or a W/T/P-prefixed integer.
+func isIDToken(text string) bool {
+	_, err := parseID(text)
+	return err == nil
+}
+
 // parseID strips an optional W/T/P prefix (case-insensitive) and returns the numeric value.
 // Accepts "W1234", "w1234", "T4", "t4", "P10", "p10", or plain "1234".
 func parseID(text string) (int, error) {
@@ -342,15 +427,6 @@ func parseID(text string) (int, error) {
 		}
 	}
 	return strconv.Atoi(text)
-}
-
-func mustID(text, name string) int {
-	value, err := parseID(text)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "invalid %s: %s\n", name, text)
-		os.Exit(1)
-	}
-	return value
 }
 
 func fatal(err error) {
