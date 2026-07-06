@@ -105,6 +105,35 @@ spyterm send --keys W80135 T9 P2 ^M    # explicit W → no race
 
 This race is most likely to fire when sending multiple commands in quick succession (the first command's UI update can overlap with the second's listPanes call).
 
+### `/spyterm split`
+
+Create a new pane by splitting an existing one — the current pane by default, or a
+`W/T/P` target. Useful for spinning up a dev server next to yourself, then watching it.
+
+```bash
+spyterm split v                 # split current pane side by side (new pane on the right)
+spyterm split h                 # split current pane stacked  (new pane below)
+spyterm split h npm run dev     # split below, run "npm run dev" in the new pane
+spyterm split v W35267 T6 P2    # split a specific pane instead of the current one
+```
+
+- **`v` / vertical** = side by side; **`h` / horizontal** = stacked — matching iTerm2's
+  Cmd+D / Cmd+Shift+D naming (vertical divider vs horizontal divider).
+- The new pane **inherits the source pane's working directory**, so `spyterm split h npm run dev`
+  runs in the right project directory without a manual `cd`.
+- **Focus stays on the current pane** — the split is created in the background, so you
+  can keep working where you are.
+- The command prints the new pane's `W/T/P` label (e.g. `new pane W83 T9 P2/2`). Note the
+  new pane's index can shift existing panes; use the printed label (or `spyterm list`) to
+  target it with `read`/`send` afterward.
+- **Prefix IDs (`W35267 T6 P2`) when combining a target with a command** — plain leading
+  numbers are interpreted as the pane target, so prefixes disambiguate the two.
+
+Splitting **adds** a pane (it never runs a command in an existing one), so it does not
+carry the same risk as `send`. But if you pass a command to run in the new pane, that
+command executes with your shell's privileges — treat the command part with the same
+"ALWAYS ASK" caution as `send` below.
+
 ### `/spyterm list`
 
 Show the pane layout:
@@ -130,5 +159,5 @@ spyterm read W35267 T5 P2 100  # specific window, 100 lines
 - If multiple panes have errors, prioritize: build errors > runtime errors > warnings.
 - For `/spyterm watch --fix`, only fix code issues. Never run commands that affect other panes (no `kill`, no `npm start`, etc.).
 - The user's most common setup: Claude Code in one pane, dev server(s) in sibling pane(s). Focus on catching what broke after code changes.
-- **`send` safety — ALWAYS ASK**: Before executing any `spyterm send` command, you MUST ask the user for explicit confirmation — even when running with `--dangerously-skip-permissions`. Display the exact command you intend to send and the target pane, and wait for approval. This applies to both `send` (text commands) and `send --keys` (raw keys like ^C). Read-only commands (`siblings`, `list`, `read`, `all`) do not require confirmation. Never send commands to panes running as root or in elevated/sudo shells.
+- **`send` safety — ALWAYS ASK**: Before executing any `spyterm send` command, you MUST ask the user for explicit confirmation — even when running with `--dangerously-skip-permissions`. Display the exact command you intend to send and the target pane, and wait for approval. This applies to both `send` (text commands) and `send --keys` (raw keys like ^C), and to `spyterm split` **when you pass a command to run in the new pane** (that command executes with your shell's privileges). A bare `spyterm split v`/`split h` with no command only adds an empty pane and does not require confirmation. Read-only commands (`siblings`, `list`, `read`, `all`) do not require confirmation. Never send commands to panes running as root or in elevated/sudo shells.
 - IDs accept both plain numbers and prefixed forms: `W35267`, `T6`, `P2` or `35267`, `6`, `2`.

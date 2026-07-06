@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const version = "0.3.1"
+const version = "0.4.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -32,6 +32,8 @@ func main() {
 		cmdRead()
 	case "send":
 		cmdSend()
+	case "split":
+		cmdSplit()
 	case "all", "a":
 		lineCount := intArg(2, 30)
 		cmdAll(lineCount)
@@ -274,6 +276,75 @@ func cmdSend() {
 	}
 }
 
+func cmdSplit() {
+	// Parse: split <v|h> [W T P] [command...]
+	// With no target, splits the current pane (the one spyterm runs inside).
+	// With a W/T/P target, splits that pane. Any trailing args form a command
+	// run in the new pane. Prefix IDs (W35267 T6 P2) when combining a target
+	// with a command whose first word could be mistaken for a pane number.
+	args := os.Args[2:]
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: spyterm split <v|h> [W<id>] [T<tab> P<pane>] [command...]")
+		os.Exit(1)
+	}
+
+	direction, err := parseDirection(args[0])
+	if err != nil {
+		fatal(err)
+	}
+	rest := args[1:]
+
+	windowID, tab, pane, commandStart, haveTarget := parseSplitTarget(rest)
+
+	var target *Pane
+	if haveTarget {
+		// Resolve indices → stable SessionID, same as send: addressing the
+		// split by index is a TOCTOU race against concurrent topology changes.
+		target, err = readPane(windowID, tab, pane)
+		if err != nil {
+			fatal(err)
+		}
+	} else {
+		tty, err := findTTY()
+		if err != nil {
+			fatal(err)
+		}
+		target, err = paneByTTY(tty)
+		if err != nil {
+			fatal(err)
+		}
+		commandStart = 0
+	}
+
+	command := strings.Join(rest[commandStart:], " ")
+
+	newSessionID, newTTY, err := splitPane(target.SessionID, direction)
+	if err != nil {
+		fatal(err)
+	}
+
+	// Resolve the new session back to a W/T/P label so the caller has a
+	// race-free target to read from or send to next.
+	label := "?"
+	if newPane := paneBySessionID(newSessionID); newPane != nil {
+		label = newPane.Label()
+	}
+
+	orientation := "horizontally (stacked below)"
+	if direction == "vertically" {
+		orientation = "vertically (side by side)"
+	}
+
+	fmt.Printf("split %s %s → new pane %s (tty %s)\n", target.Label(), orientation, label, newTTY)
+
+	if command != "" {
+		if err := sendToPane(newSessionID, command); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("ran in new pane: %s\n", command)
+	}
+}
+
 func cmdAll(lines int) {
 	panes, err := listPanes()
 	if err != nil {
@@ -296,16 +367,23 @@ Usage:
   spyterm read [W] T P [N]   Read pane (accepts W1234/1234, T4/4, P2/2)
   spyterm send [W] T P CMD   Send a command to a pane (text + Enter)
   spyterm send --keys T P K  Send raw keys (^C, ^D, ^Z, ^[, etc.)
+  spyterm split <v|h> [W T P] [CMD]  Split current (or target) pane; optional CMD
   spyterm all [N]            Read last N lines from ALL panes
   spyterm version            Show version
 
 Aliases: siblings=s, list=ls, read=r, all=a
+
+Split: v=vertical (side by side), h=horizontal (stacked). Focus stays on the
+current pane. Splits the current pane unless a W/T/P target is given.
 
 Examples:
   spyterm                    # see what's in your split panes
   spyterm s 200              # last 200 lines from siblings
   spyterm read 6 3           # tab 6, pane 3, last 50 lines
   spyterm read 35267 6 3 100 # specific window, tab 6, pane 3, 100 lines
+  spyterm split v            # split current pane side by side
+  spyterm split h npm run dev # split below, run "npm run dev" in the new pane
+  spyterm split v W35267 T6 P2 # split a specific pane side by side
 `)
 }
 
@@ -330,6 +408,47 @@ func intArgFromSlice(args []string, index, defaultValue int) int {
 		return defaultValue
 	}
 	return value
+}
+
+// parseDirection maps a split-direction shorthand to iTerm2's AppleScript verb.
+// Vertical means side by side (new pane to the right); horizontal means stacked
+// (new pane below) — matching iTerm2's own naming and Cmd+D / Cmd+Shift+D.
+func parseDirection(text string) (string, error) {
+	switch strings.ToLower(text) {
+	case "v", "vertical", "vertically":
+		return "vertically", nil
+	case "h", "horizontal", "horizontally":
+		return "horizontally", nil
+	}
+	return "", fmt.Errorf("invalid split direction %q (use v/vertical or h/horizontal)", text)
+}
+
+// parseSplitTarget interprets the args after the direction as an optional
+// [W] T P pane target followed by an optional command. A target requires at
+// least two leading ID tokens (T P); if the first arg is not an ID token there
+// is no target and the whole slice is a command for the current pane. Mirrors
+// the read/send window-vs-tab heuristic: a first token >100 or W-prefixed with
+// a third ID token present is treated as a window ID.
+func parseSplitTarget(args []string) (windowID, tab, pane, commandStart int, haveTarget bool) {
+	if len(args) < 2 || !isIDToken(args[0]) || !isIDToken(args[1]) {
+		return 0, 0, 0, 0, false
+	}
+	first, _ := parseID(args[0])
+	hasWindowPrefix := len(args[0]) > 1 && (args[0][0] == 'W' || args[0][0] == 'w')
+	if (first > 100 || hasWindowPrefix) && len(args) >= 3 && isIDToken(args[2]) {
+		second, _ := parseID(args[1])
+		third, _ := parseID(args[2])
+		return first, second, third, 3, true
+	}
+	second, _ := parseID(args[1])
+	return 0, first, second, 2, true
+}
+
+// isIDToken reports whether text is a valid pane-address token: a plain integer
+// or a W/T/P-prefixed integer.
+func isIDToken(text string) bool {
+	_, err := parseID(text)
+	return err == nil
 }
 
 // parseID strips an optional W/T/P prefix (case-insensitive) and returns the numeric value.

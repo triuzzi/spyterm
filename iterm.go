@@ -150,6 +150,35 @@ func siblings(tty string) ([]Pane, error) {
 	return result, nil
 }
 
+// paneByTTY returns the pane whose TTY matches, or an error if none is found.
+func paneByTTY(tty string) (*Pane, error) {
+	all, err := listPanes()
+	if err != nil {
+		return nil, err
+	}
+	for i := range all {
+		if all[i].TTY == tty {
+			return &all[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no iTerm2 session found with TTY %s", tty)
+}
+
+// paneBySessionID returns the pane with the given stable session ID, or nil if
+// none matches. Used to resolve a freshly-split session back to its W/T/P label.
+func paneBySessionID(sessionID string) *Pane {
+	all, err := listPanes()
+	if err != nil {
+		return nil
+	}
+	for i := range all {
+		if all[i].SessionID == sessionID {
+			return &all[i]
+		}
+	}
+	return nil
+}
+
 // readPane returns the contents of a specific pane by window ID, tab, and pane index.
 func readPane(windowID, tab, paneIndex int) (*Pane, error) {
 	all, err := listPanes()
@@ -243,6 +272,65 @@ findAndSend("%s", %s)
 
 	_, err := runAppleScript(script)
 	return err
+}
+
+// splitPane splits the session addressed by SessionID and returns the new
+// session's stable id and tty. direction must be exactly "vertically" (new pane
+// beside the original) or "horizontally" (new pane below it) — the CLI maps the
+// v/h shorthands to these, so the verb is never user-controlled and is safe to
+// interpolate into the script.
+//
+// The new pane inherits the source pane's working directory (via iTerm2's
+// session.path variable) so a split reproduces the pane you split — the useful
+// behavior when splitting to run project commands, regardless of the profile's
+// working-directory setting. After splitting, iTerm2 focuses the new pane; the
+// script re-selects the original session so the caller's pane (e.g. the one
+// running Claude Code) keeps the keyboard cursor.
+//
+// No `try` blocks: a vanishing tab/session surfaces loudly rather than being
+// silently skipped, and the final `error` fires only when the walk completes
+// without finding the id.
+func splitPane(sessionID, direction string) (newSessionID, newTTY string, err error) {
+	escapedID := strings.ReplaceAll(sessionID, "\\", "\\\\")
+	escapedID = strings.ReplaceAll(escapedID, "\"", "\\\"")
+
+	script := fmt.Sprintf(`
+on findAndSplit(targetID)
+	set delim to character id 9
+	tell application "iTerm2"
+		repeat with w in windows
+			repeat with t in tabs of w
+				repeat with s in sessions of t
+					if (id of s) is targetID then
+						tell s to set srcPath to (variable named "session.path")
+						tell s
+							set newSession to (split %s with same profile)
+						end tell
+						if srcPath is not "" then
+							tell newSession to write text ("cd " & quoted form of srcPath)
+						end if
+						tell s to select
+						return ((id of newSession) & delim & (tty of newSession)) as text
+					end if
+				end repeat
+			end repeat
+		end repeat
+	end tell
+	error "session with id " & targetID & " no longer exists"
+end findAndSplit
+
+return findAndSplit("%s")
+`, direction, escapedID)
+
+	output, err := runAppleScript(script)
+	if err != nil {
+		return "", "", err
+	}
+	parts := strings.SplitN(strings.TrimSpace(output), "\t", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("unexpected split result: %q", output)
+	}
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), nil
 }
 
 // resolveKey maps a key name to an ASCII character code, or -1 if not a known key.

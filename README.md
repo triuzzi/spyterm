@@ -28,10 +28,34 @@ spyterm list [-v]          # show all windows/tabs/panes (-v for content)
 spyterm read [W] T P [N]   # read a specific pane
 spyterm send [W] T P CMD   # send a command to a pane (text + Enter)
 spyterm send --keys T P K  # send raw keys (^C, ^D, ^Z, ^[, etc.)
+spyterm split <v|h> [W T P] [CMD]  # split a pane; optionally run CMD in it
 spyterm all [N]            # read all panes
 ```
 
 IDs accept both plain numbers and prefixed forms: `W35267`, `T6`, `P2` or `35267`, `6`, `2`.
+
+### Splitting panes
+
+`spyterm split` creates a new pane by splitting an existing one — the current pane
+by default, or a specific `W/T/P` target. Handy for an assistant that wants to spin
+up a dev server next to itself and then watch it.
+
+```bash
+spyterm split v                  # split current pane side by side (new pane right)
+spyterm split h                  # split current pane stacked (new pane below)
+spyterm split h npm run dev      # split below, run "npm run dev" in the new pane
+spyterm split v W35267 T6 P2     # split a specific pane instead of the current one
+```
+
+- **`v` / vertical** = side by side (vertical divider); **`h` / horizontal** = stacked
+  (horizontal divider) — matching iTerm2's own Cmd+D / Cmd+Shift+D naming.
+- The new pane **inherits the source pane's working directory**, so splitting to run
+  project commands lands you in the right place regardless of your profile's
+  working-directory setting.
+- **Focus stays on the current pane** — the split happens in the background, so an
+  assistant can create and drive a pane without stealing your cursor.
+- The command prints the new pane's `W/T/P` label so you can `read` or `send` to it
+  next.
 
 ### How it works
 
