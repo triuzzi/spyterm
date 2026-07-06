@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const version = "0.4.0"
+const version = "0.4.1"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -277,13 +277,13 @@ func cmdSplit() {
 
 	command := strings.Join(rest[commandStart:], " ")
 
-	newSessionID, newTTY, err := splitPane(target.SessionID, direction)
+	newSessionID, err := splitPane(target.SessionID, direction)
 	if err != nil {
 		fatal(err)
 	}
 
-	// Resolve the new session back to a W/T/P label so the caller has a
-	// human-readable handle to read from or send to next.
+	// Resolve the new session back to a W/T/P label (and its tty) so the caller
+	// has a human-readable handle to read from or send to next.
 	newPane, err := paneBySessionID(newSessionID)
 	if err != nil {
 		fatal(err)
@@ -294,7 +294,7 @@ func cmdSplit() {
 		orientation = "vertically (side by side)"
 	}
 
-	fmt.Printf("split %s %s → new pane %s (tty %s)\n", target.Label(), orientation, newPane.Label(), newTTY)
+	fmt.Printf("split %s %s → new pane %s (tty %s)\n", target.Label(), orientation, newPane.Label(), newPane.TTY)
 
 	if command != "" {
 		if err := sendToPane(newSessionID, command); err != nil {
@@ -390,12 +390,21 @@ func parseDirection(text string) (string, error) {
 	return "", fmt.Errorf("invalid split direction %q (use v/vertical or h/horizontal)", text)
 }
 
+// minWindowID is the threshold above which a bare leading numeric token is read
+// as an iTerm2 window id rather than a tab index. iTerm2 window ids are large
+// (thousands); tab indices are small, so a value this high is never a tab. A
+// W/w prefix forces the window interpretation regardless of value.
+const minWindowID = 100
+
 // parsePaneAddress interprets leading args as an optional [W] T P pane address,
 // returning the parsed indices, the index where the remaining args begin, and
-// ok=false when the leading args don't form a valid T P (or W T P) address. It
-// is the single source of the read/send/split window-vs-tab heuristic: a first
-// token >100 or W-prefixed, with a third ID token present, is a window ID;
-// otherwise the first two tokens are the tab and pane.
+// ok=false when the leading args don't form a valid address. It is the single
+// source of the read/send/split window-vs-tab heuristic. When the first token is
+// window-like (>minWindowID or W-prefixed) it commits to the W T P form and
+// requires all three to be ID tokens, failing loudly (ok=false) on a partial
+// match rather than silently reinterpreting a window id as a tab and swallowing
+// the bad token into the caller's command. Otherwise the first two tokens are
+// the tab and pane.
 func parsePaneAddress(args []string) (windowID, tab, pane, rest int, ok bool) {
 	if len(args) < 2 || !isIDToken(args[0]) || !isIDToken(args[1]) {
 		return 0, 0, 0, 0, false
@@ -403,7 +412,10 @@ func parsePaneAddress(args []string) (windowID, tab, pane, rest int, ok bool) {
 	first, _ := parseID(args[0])
 	second, _ := parseID(args[1])
 	hasWindowPrefix := len(args[0]) > 1 && (args[0][0] == 'W' || args[0][0] == 'w')
-	if (first > 100 || hasWindowPrefix) && len(args) >= 3 && isIDToken(args[2]) {
+	if first > minWindowID || hasWindowPrefix {
+		if len(args) < 3 || !isIDToken(args[2]) {
+			return 0, 0, 0, 0, false
+		}
 		third, _ := parseID(args[2])
 		return first, second, third, 3, true
 	}
