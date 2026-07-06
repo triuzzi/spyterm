@@ -89,21 +89,23 @@ the other panes in that tab.
 
 ## Security
 
-The `send` command lets you (or an AI agent) execute arbitrary commands in other
-iTerm2 terminal sessions. This is powerful — an agent can restart a crashed dev
-server or send Ctrl+C to a hung process — but it means any tool calling
-`spyterm send` can type into your other panes as if it were you at the keyboard.
+The `send` and `split` commands let you (or an AI agent) run arbitrary commands in
+iTerm2 sessions: `send` types into an existing pane, and `split` can launch a command
+in the new pane it creates. This is powerful — an agent can restart a crashed dev
+server or spin one up in a fresh split — but it means any tool calling them can run
+commands in your panes as if it were you at the keyboard. (A bare `split v`/`split h`
+with no command only adds an empty pane and carries no such risk.)
 
 The permission boundary lives at the agent/skill level, not in spyterm itself:
 
 - **Claude Code** gates bash commands behind user approval by default.
 - The [spyterm skill](skill/SKILL.md) instructs agents to always ask for
-  confirmation before sending commands, even when running with
-  `--dangerously-skip-permissions`.
+  confirmation before sending commands — or splitting with a command — even when
+  running with `--dangerously-skip-permissions`.
 - Read-only commands (`siblings`, `list`, `read`, `all`) carry no write risk.
 
-If you only need observation, you never have to use `send`. If you do use it,
-understand that anything an agent sends will execute with your shell's full
+If you only need observation, you never have to use `send` or `split`. If you do,
+understand that anything an agent runs will execute with your shell's full
 privileges in the target pane.
 
 ## License

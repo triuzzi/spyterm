@@ -55,6 +55,21 @@ func TestIsIDToken(t *testing.T) {
 	}
 }
 
+func TestEscapeForAppleScript(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{`plain`, `plain`},
+		{`a"b`, `a\"b`},
+		{`a\b`, `a\\b`},
+		{`\"`, `\\\"`}, // backslash-then-quote order: \ -> \\, then " -> \"
+		{``, ``},
+	}
+	for _, tt := range tests {
+		if got := escapeForAppleScript(tt.in); got != tt.want {
+			t.Errorf("escapeForAppleScript(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 func TestParsePaneAddress(t *testing.T) {
 	tests := []struct {
 		name                          string
@@ -71,7 +86,9 @@ func TestParsePaneAddress(t *testing.T) {
 		{"window tab pane", []string{"35267", "6", "3"}, 35267, 6, 3, 3, true},
 		{"prefixed window", []string{"W35267", "6", "3"}, 35267, 6, 3, 3, true},
 		{"all prefixed", []string{"W35267", "T6", "P2"}, 35267, 6, 2, 3, true},
-		{"big first, two args, treated as tab", []string{"200", "5"}, 0, 200, 5, 2, true},
+		{"window-like first, 2 tokens, incomplete", []string{"200", "5"}, 0, 0, 0, 0, false},
+		{"W-prefix, 2 tokens, incomplete", []string{"W35267", "6"}, 0, 0, 0, 0, false},
+		{"window-like, 3 tokens, invalid third", []string{"W35267", "6", "notanum"}, 0, 0, 0, 0, false},
 		{"boundary 100 is tab", []string{"100", "5", "2"}, 0, 100, 5, 2, true},
 		{"boundary 101 is window", []string{"101", "5", "2"}, 101, 5, 2, 3, true},
 		{"command, no target", []string{"npm", "run", "dev"}, 0, 0, 0, 0, false},

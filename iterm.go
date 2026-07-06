@@ -233,6 +233,22 @@ end %s
 `, handler, action, handler)
 }
 
+// sessionHandler is the name of the AppleScript handler sessionWalk emits;
+// callers must invoke the same name, so it is defined in one place.
+const sessionHandler = "findSession"
+
+// sendPayload locates the session addressed by sessionID via sessionWalk and
+// writes payloadExpr to it. payloadExpr is an AppleScript string/character
+// expression, written with `newline no` so the caller decides line termination.
+func sendPayload(sessionID, payloadExpr string) error {
+	action := fmt.Sprintf(`					tell s to write text (%s) newline no
+					return`, payloadExpr)
+	script := sessionWalk(sessionHandler, action) +
+		fmt.Sprintf("\n%s(\"%s\")\n", sessionHandler, escapeForAppleScript(sessionID))
+	_, err := runAppleScript(script)
+	return err
+}
+
 // sendToPane sends a text command to a specific pane addressed by SessionID.
 // The text is sent followed by a carriage return (^M / ASCII 13), which both
 // shells (via the TTY's ICRNL flag) and raw-mode TUIs (Claude Code, vim, fzf,
@@ -240,12 +256,7 @@ end %s
 // which shells cook as Enter but raw-mode TUIs ignore — so plain default would
 // leave TUI prompts typed-but-unsubmitted.
 func sendToPane(sessionID, text string) error {
-	action := fmt.Sprintf(`						tell s to write text ("%s" & (character id 13)) newline no
-						return`, escapeForAppleScript(text))
-	script := sessionWalk("findSession", action) +
-		fmt.Sprintf("\nfindSession(\"%s\")\n", escapeForAppleScript(sessionID))
-	_, err := runAppleScript(script)
-	return err
+	return sendPayload(sessionID, fmt.Sprintf(`"%s" & (character id 13)`, escapeForAppleScript(text)))
 }
 
 // sendKeysToPane sends raw key sequences to a pane addressed by SessionID.
@@ -261,47 +272,41 @@ func sendKeysToPane(sessionID string, keys []string) error {
 			parts = append(parts, fmt.Sprintf("\"%s\"", escapeForAppleScript(key)))
 		}
 	}
-	action := fmt.Sprintf(`						tell s to write text (%s) newline no
-						return`, strings.Join(parts, " & "))
-	script := sessionWalk("findSession", action) +
-		fmt.Sprintf("\nfindSession(\"%s\")\n", escapeForAppleScript(sessionID))
-	_, err := runAppleScript(script)
-	return err
+	return sendPayload(sessionID, strings.Join(parts, " & "))
 }
 
 // splitPane splits the session addressed by SessionID and returns the new
-// session's stable id and tty. direction must be exactly directionVertical (new
-// pane beside the original) or directionHorizontal (new pane below it) — the CLI
-// maps the v/h shorthands to these, so the verb is never user-controlled and is
-// safe to interpolate into the script.
+// session's stable id. direction must be exactly directionVertical (new pane
+// beside the original) or directionHorizontal (new pane below it) — the CLI maps
+// the v/h shorthands to these, so the verb is never user-controlled and is safe
+// to interpolate into the script.
 //
 // The new pane inherits the source pane's working directory (via iTerm2's
 // session.path variable) so a split reproduces the pane you split — the useful
 // behavior when splitting to run project commands, regardless of the profile's
 // working-directory setting. After splitting, iTerm2 focuses the new pane; the
 // script re-selects the split source so that pane keeps the keyboard cursor.
-func splitPane(sessionID, direction string) (newSessionID, newTTY string, err error) {
-	action := fmt.Sprintf(`						set delim to character id 9
-						tell s to set srcPath to (variable named "session.path")
-						tell s
-							set newSession to (split %s with same profile)
-						end tell
-						if srcPath is not "" then
-							tell newSession to write text ("cd " & quoted form of srcPath)
-						end if
-						tell s to select
-						return ((id of newSession) & delim & (tty of newSession)) as text`, direction)
-	script := sessionWalk("findSession", action) +
-		fmt.Sprintf("\nreturn findSession(\"%s\")\n", escapeForAppleScript(sessionID))
+func splitPane(sessionID, direction string) (newSessionID string, err error) {
+	action := fmt.Sprintf(`					tell s to set srcPath to (variable named "session.path")
+					tell s
+						set newSession to (split %s with same profile)
+					end tell
+					if srcPath is not "" then
+						tell newSession to write text ("cd " & quoted form of srcPath)
+					end if
+					tell s to select
+					return (id of newSession) as text`, direction)
+	script := sessionWalk(sessionHandler, action) +
+		fmt.Sprintf("\nreturn %s(\"%s\")\n", sessionHandler, escapeForAppleScript(sessionID))
 	output, err := runAppleScript(script)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	parts := strings.SplitN(strings.TrimSpace(output), "\t", 2)
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("unexpected split result: %q", output)
+	newSessionID = strings.TrimSpace(output)
+	if newSessionID == "" {
+		return "", fmt.Errorf("split returned no session id")
 	}
-	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), nil
+	return newSessionID, nil
 }
 
 // resolveKey maps a key name to an ASCII character code, or -1 if not a known key.
